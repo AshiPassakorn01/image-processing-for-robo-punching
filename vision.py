@@ -1,8 +1,9 @@
 import cv2
 import numpy as np
 import math
+from plc_module import PLCController
 
-def process(image_path, ratio=0.35, inner_r=140, outer_r=225): # เพิ่มพารามิเตอร์ inner_r, outer_r
+def process(image_path, ratio=0.35, inner_r=140, outer_r=225): 
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"cant open: {image_path}")
@@ -23,9 +24,7 @@ def process(image_path, ratio=0.35, inner_r=140, outer_r=225): # เพิ่ม
     cv2.rectangle(resized_frame, (width - 190, 0), (width-2, 110), (0, 0, 0), 2)
     
     # draw circles and axes
-    # draw outer circle (max boundary)
     cv2.circle(resized_frame, (cx, cy), outer_r, (180,30,255), 1)
-    # draw inner circle (min boundary)
     cv2.circle(resized_frame, (cx, cy), inner_r, (180,30,255), 1)
 
     cv2.line(resized_frame, (cx, 0), (cx, height), (255, 50, 50), 2) #  Y
@@ -41,19 +40,12 @@ def process(image_path, ratio=0.35, inner_r=140, outer_r=225): # เพิ่ม
     blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
     # mask for donut shape (ring)
-    # create a blank mask with the same dimensions as the resized frame
     donut_mask = np.zeros((height, width), dtype=np.uint8)
-    
-    # paint the outer circle (Outer) with white color
     cv2.circle(donut_mask, (cx, cy), outer_r, 255, -1)
-    # paint the inner circle (Inner) with black color to create a donut shape
     cv2.circle(donut_mask, (cx, cy), inner_r, 0, -1)
 
-    # merge blue_mask with donut_mask using bitwise AND to keep only the blue areas that are within the donut shape
-    # resulting final_mask will have white pixels only where both blue_mask and donut_mask are white (255)
     final_mask = cv2.bitwise_and(blue_mask, blue_mask, mask=donut_mask)
 
-    # find contours in the final_mask to locate the blue object within the valid donut-shaped region
     contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     # 6 piece sector lines [pizza slice]
@@ -85,11 +77,9 @@ def process(image_path, ratio=0.35, inner_r=140, outer_r=225): # เพิ่ม
         centroid_y = y + h // 2
         cv2.circle(resized_frame, (centroid_x, centroid_y), 8, (0, 255, 0), -1)
         
-        # calculate vector components
         dx = centroid_x - cx
         dy = centroid_y - cy
 
-        # draw vector and components
         cv2.arrowedLine(resized_frame, (cx, cy), (centroid_x, centroid_y), (0, 0, 240), 2)
         
         cv2.arrowedLine(resized_frame, (cx, cy), (centroid_x, cy), (50, 230, 240), 2) # X component
@@ -98,7 +88,6 @@ def process(image_path, ratio=0.35, inner_r=140, outer_r=225): # เพิ่ม
         cv2.arrowedLine(resized_frame, (centroid_x, cy), (centroid_x, centroid_y), (0, 140, 255), 2) # Y component
         cv2.putText(resized_frame, f"y={dy}", (width - 180, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 2)
 
-        # find angle ccw from positive X-axis
         angle_rad = math.atan2(-dy, dx)
         angle_deg = math.degrees(angle_rad)
         if angle_deg < 0:
@@ -107,7 +96,6 @@ def process(image_path, ratio=0.35, inner_r=140, outer_r=225): # เพิ่ม
         cv2.putText(resized_frame, f"Centroid: ({centroid_x}, {centroid_y})", (width - 180, 80), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
         
-        # ดึงฟังก์ชัน get_zone (ผมสมมติว่าคุณประกาศไว้ด้านล่างเหมือนโค้ดเก่า)
         zone = get_zone(angle_deg)
         cv2.putText(resized_frame, f"Zone: {zone}", (width - 180, 100), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 2)
@@ -120,33 +108,45 @@ def process(image_path, ratio=0.35, inner_r=140, outer_r=225): # เพิ่ม
     return resized_frame, angle_deg, dx, dy
 
 def get_zone(angle_deg):
-    """
-    - zone 1: 330 - 30 
-    - zone 2: 30 - 90 
-    - zone 3: 90 - 150 
-    - zone 4: 150 - 210 
-    - zone 5: 210 - 270 
-    - zone 6: 270 - 330 
-    """
     normalized_angle = angle_deg % 360
-    
     zone = int(((normalized_angle + 30) % 360) // 60) + 1
-    
     return zone
 
 if __name__ == "__main__":
-    target_image = r"test case\7.png"
+    target_image = r"test case\8.png"
+    
+    plc = PLCController()
+    
+    if not plc.plcConnect("192.168.3.250"):
+        print("Failed to connect to PLC. Exiting.")
+        exit(1)
     
     result_img, found_angle, found_dx, found_dy = process(target_image, ratio=0.35)
+    
+    zonee = get_zone(found_angle) if found_angle is not None else None
+    
+    # data write to PLC
+    if zonee is not None:
+        # zonee [1-6] for robot arm zone selection
+        plc.write_holding(address=100, value=zonee)
         
-    """zone = get_zone(found_angle) if found_angle is not None else print("cannot determine zone without angle")
-    if zone is not None:
-        print(f"Zone: {zone}")"""
+        # zonee - 1 [interpolation table for robot arm]
+        plc.write_holding(address=102, value=zonee - 1)
         
+        #sequcene: M100 ON -- SET START
+        plc.write_M(address=100, status=True)  # M100 ON
+        
+        print(f"Sent to PLC: D100={zonee}, D102={zonee - 1}, M100=ON")
+    else:
+        print("No zone command due to missing angle")
+    # ------------------------------------
+
     if result_img is not None:
         if found_angle is not None:
-            print(f"ผลลัพธ์: dx={found_dx}, dy={found_dy}, ทำมุม={found_angle:.2f} องศา")
+            print(f"result: dx={found_dx}, dy={found_dy}, Angle={found_angle:.2f} deg")
             
         cv2.imshow("Result Image", result_img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+        
+    plc.plcDisconnect()
